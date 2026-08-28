@@ -286,6 +286,7 @@ ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_REF=main
 ARG VLLM_SOURCE_MODE=remote
 ARG VLLM_SOURCE_COMMIT=""
+ARG VLLM_VERSION_ANCHOR=""
 
 # Pinned while investigating an SM121 DeepSeek-V4 MXFP4 grouped scale-factor
 # regression first observed at nv_dev f8e8fb5 (PR #384); last known good.
@@ -629,12 +630,49 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # RUN curl -L https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/34758.diff | patch -p1 -R || echo "Cannot revert PR #34758, skipping"
 # RUN curl -L https://patch-diff.githubusercontent.com/raw/vllm-project/vllm/pull/34302.diff | patch -p1 -R || echo "Cannot revert PR #34302, skipping"
 
+# vLLM release tags live on branches that diverge from main, so setuptools-scm
+# describes a main build from a stale release candidate and could report a version multiple
+# releases behind the code being compiled. When the wrapper resolved a release
+# tag, derive the version from the commit where that release branched off
+# instead. Runs after every source patch above so the dirty marker is accurate.
+# Cosmetic only: any problem leaves the file empty and setuptools-scm decides.
+RUN set -eu; \
+    : > /tmp/vllm-scm-version; \
+    if [ -n "$VLLM_VERSION_ANCHOR" ]; then \
+        if ! git rev-parse -q --verify "refs/tags/${VLLM_VERSION_ANCHOR}^{commit}" >/dev/null; then \
+            echo "Version anchor ${VLLM_VERSION_ANCHOR} is absent from this checkout; keeping the setuptools-scm version."; \
+        else \
+            anchor_base="$(git merge-base "refs/tags/${VLLM_VERSION_ANCHOR}" HEAD || true)"; \
+            if [ -z "$anchor_base" ]; then \
+                echo "Version anchor ${VLLM_VERSION_ANCHOR} shares no history with HEAD; keeping the setuptools-scm version."; \
+            else \
+                anchor_version="${VLLM_VERSION_ANCHOR#v}"; \
+                if [ "$anchor_base" = "$(git rev-parse HEAD)" ]; then \
+                    scm_version="$anchor_version"; \
+                else \
+                    next_version="$(printf '%s' "$anchor_version" | awk -F. '{printf "%s.%s.%s", $1, $2, $3 + 1}')"; \
+                    scm_version="${next_version}.dev$(git rev-list --count "${anchor_base}..HEAD")+g$(git rev-parse --short=9 HEAD)"; \
+                fi; \
+                if [ -n "$(git status --porcelain)" ]; then \
+                    scm_version="${scm_version}.d$(date -u +%Y%m%d)"; \
+                fi; \
+                printf '%s\n' "$scm_version" > /tmp/vllm-scm-version; \
+                echo "Anchored vLLM wheel version to ${VLLM_VERSION_ANCHOR}: ${scm_version}"; \
+            fi; \
+        fi; \
+    fi
+
 # Final Compilation
 RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=cache,id=cargo-registry,target=/opt/cargo/registry \
     --mount=type=cache,id=cargo-git,target=/opt/cargo/git \
     --mount=type=cache,id=vllm-rust-target,target=/workspace/vllm/vllm/target \
+    set -eu; \
+    if [ -s /tmp/vllm-scm-version ]; then \
+        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$(cat /tmp/vllm-scm-version)"; \
+        export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM; \
+    fi; \
     VLLM_REQUIRE_RUST_FRONTEND=1 CARGO_BUILD_JOBS=${MAX_JOBS} \
     uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v
 

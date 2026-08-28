@@ -572,6 +572,112 @@ test_local_vllm_source_defaults_to_head() {
     pass "--vllm-source-dir defaults to the checkout HEAD"
 }
 
+create_tagged_vllm_repo() {
+    TAGGED_VLLM_REPO="$CASE_DIR/tagged-vllm"
+    mkdir -p "$TAGGED_VLLM_REPO"
+    git -C "$TAGGED_VLLM_REPO" init -q
+    git -C "$TAGGED_VLLM_REPO" config user.name "Build Test"
+    git -C "$TAGGED_VLLM_REPO" config user.email "build-test@example.invalid"
+    git -C "$TAGGED_VLLM_REPO" config commit.gpgsign false
+    printf '[build-system]\nrequires = []\n' > "$TAGGED_VLLM_REPO/pyproject.toml"
+    git -C "$TAGGED_VLLM_REPO" add pyproject.toml
+    git -C "$TAGGED_VLLM_REPO" commit -q -m "tagged vLLM fixture"
+    # v0.10.0 outranks v0.9.2 only under version sort; the rc tags must lose to
+    # v0.28.0 even though v0.28.1rc1 is numerically higher.
+    for tag in v0.9.2 v0.10.0 v0.26.1rc0 v0.27.1 v0.28.0 v0.28.1rc1; do
+        git -C "$TAGGED_VLLM_REPO" tag "$tag"
+    done
+}
+
+test_version_anchor_resolves_newest_release_tag() {
+    setup_fixture
+    create_tagged_vllm_repo
+    run_build --vllm-repo "$TAGGED_VLLM_REPO" || fail "--vllm-repo anchor run failed"
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_VERSION_ANCHOR=v0\.28\.0'
+    assert_output_contains 'Anchoring the vLLM wheel version to release tag v0\.28\.0\.'
+    pass "version anchor resolves the newest final release tag"
+}
+
+test_version_anchor_derived_from_local_source_tags() {
+    setup_fixture
+    create_local_vllm_source
+    git -C "$LOCAL_VLLM_SOURCE_DIR" tag v0.27.1
+    git -C "$LOCAL_VLLM_SOURCE_DIR" tag v0.28.0
+    git -C "$LOCAL_VLLM_SOURCE_DIR" tag v0.28.1rc1
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" || \
+        fail "--vllm-source-dir anchor run failed"
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_VERSION_ANCHOR=v0\.28\.0'
+    assert_output_contains 'Anchoring the vLLM wheel version to release tag v0\.28\.0\.'
+    pass "version anchor is derived from local source tags without network access"
+}
+
+test_version_anchor_is_forwarded_when_explicit() {
+    setup_fixture
+    create_local_vllm_source
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" --vllm-version-anchor v0.28.0 || \
+        fail "--vllm-version-anchor run failed"
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_VERSION_ANCHOR=v0\.28\.0'
+    assert_output_contains 'Anchoring the vLLM wheel version to v0\.28\.0 \(--vllm-version-anchor\)\.'
+    pass "--vllm-version-anchor overrides tag resolution"
+}
+
+test_version_anchor_none_disables_anchoring() {
+    setup_fixture
+    create_local_vllm_source
+    git -C "$LOCAL_VLLM_SOURCE_DIR" tag v0.28.0
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" --vllm-version-anchor none || \
+        fail "--vllm-version-anchor none run failed"
+    assert_log_not_contains 'VLLM_VERSION_ANCHOR='
+    assert_output_contains 'Skipping vLLM wheel version anchoring \(--vllm-version-anchor none\)\.'
+    pass "--vllm-version-anchor none disables anchoring"
+}
+
+test_version_anchor_skipped_for_explicit_ref() {
+    setup_fixture
+    create_local_vllm_source
+    git -C "$LOCAL_VLLM_SOURCE_DIR" tag v0.28.0
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" --vllm-ref qwen38next || \
+        fail "--vllm-ref anchor run failed"
+    assert_log_not_contains 'VLLM_VERSION_ANCHOR='
+    pass "an explicit --vllm-ref keeps its own setuptools-scm lineage"
+}
+
+test_version_anchor_falls_back_without_release_tags() {
+    setup_fixture
+    create_local_vllm_source
+    git -C "$LOCAL_VLLM_SOURCE_DIR" tag v0.28.0rc1
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" || \
+        fail "--vllm-source-dir untagged anchor run failed"
+    assert_log_not_contains 'VLLM_VERSION_ANCHOR='
+    assert_output_contains 'Warning: Could not resolve a vLLM release tag'
+    assert_log_contains '^docker build --target vllm-export '
+    pass "unresolvable version anchor warns and still builds"
+}
+
+test_dockerfile_anchors_vllm_wheel_version() {
+    if ! grep -Fq 'ARG VLLM_VERSION_ANCHOR=""' "$PROJECT_DIR/Dockerfile"; then
+        fail "Dockerfile does not declare VLLM_VERSION_ANCHOR"
+    fi
+    if ! grep -Fq 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$(cat /tmp/vllm-scm-version)"' \
+        "$PROJECT_DIR/Dockerfile"; then
+        fail "Dockerfile does not export the anchored version into the wheel build"
+    fi
+    # The version must be derived after the source patches so its dirty marker
+    # reflects the tree that setuptools-scm actually sees.
+    if ! python3 -c '
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+anchor = text.index("> /tmp/vllm-scm-version")
+build = text.index("# Final Compilation")
+patch = text.rindex("/tmp/vllm-patches/")
+sys.exit(0 if patch < anchor < build else 1)
+' "$PROJECT_DIR/Dockerfile"; then
+        fail "Dockerfile derives the anchored version outside the patch-then-build window"
+    fi
+    pass "Dockerfile anchors the vLLM wheel version after patching"
+}
+
 test_local_vllm_source_rejects_conflicting_repo() {
     setup_fixture
     create_local_vllm_source
@@ -1300,6 +1406,13 @@ test_local_vllm_source_defaults_to_head
 test_local_vllm_source_rejects_conflicting_repo
 test_local_vllm_source_rejects_dirty_checkout
 test_local_vllm_source_rejects_missing_ref
+test_version_anchor_resolves_newest_release_tag
+test_version_anchor_derived_from_local_source_tags
+test_version_anchor_is_forwarded_when_explicit
+test_version_anchor_none_disables_anchoring
+test_version_anchor_skipped_for_explicit_ref
+test_version_anchor_falls_back_without_release_tags
+test_dockerfile_anchors_vllm_wheel_version
 test_exp_b12x_uses_prebuilt_image
 test_exp_b12x_rebuild_vllm_uses_preset_source_build
 test_exp_b12x_allows_vllm_prs

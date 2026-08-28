@@ -32,6 +32,8 @@ VLLM_SOURCE_DIR_SET=false
 VLLM_SOURCE_COMMIT=""
 VLLM_SOURCE_STAGING_DIR=""
 VLLM_SOURCE_CONTEXT=""
+VLLM_VERSION_ANCHOR=""
+VLLM_VERSION_ANCHOR_SET=false
 EXP_B12X=false
 EXP_B12X_VLLM_REPO="https://github.com/local-inference-lab/vllm"
 EXP_B12X_VLLM_REF="dev/infernal-invocation"
@@ -241,6 +243,51 @@ prepare_local_vllm_source() {
     VLLM_SOURCE_CONTEXT="$VLLM_SOURCE_STAGING_DIR/vllm"
     VLLM_REPO="local-source"
     echo "Using clean local vLLM source at commit $VLLM_SOURCE_COMMIT."
+}
+
+# vLLM tags releases on branches that diverge from main and never merge back,
+# so `git describe` on a main build only ever reaches a months-old release
+# candidate and setuptools-scm could derive a version multiple releases behind the code
+# actually being built. Resolve the newest final release tag here so the
+# Dockerfile can anchor the wheel version to it. This is cosmetic: every failure
+# path leaves the anchor empty and keeps the current setuptools-scm behaviour.
+resolve_vllm_version_anchor() {
+    local tags=""
+
+    if [ "$VLLM_VERSION_ANCHOR_SET" = true ]; then
+        if [ "$VLLM_VERSION_ANCHOR" = "none" ]; then
+            VLLM_VERSION_ANCHOR=""
+            echo "Skipping vLLM wheel version anchoring (--vllm-version-anchor none)."
+        else
+            echo "Anchoring the vLLM wheel version to $VLLM_VERSION_ANCHOR (--vllm-version-anchor)."
+        fi
+        return 0
+    fi
+
+    VLLM_VERSION_ANCHOR=""
+
+    # An explicit ref, and the B12X fork's own branch, each carry a lineage the
+    # upstream release tags do not describe. Leave those builds alone.
+    if [ "$VLLM_REF_SET" = true ] || [ "$EXP_B12X" = true ]; then
+        return 0
+    fi
+
+    if [ "$VLLM_SOURCE_DIR_SET" = true ]; then
+        tags=$(git -C "$VLLM_SOURCE_CONTEXT" tag --list 2>/dev/null || true)
+    else
+        tags=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
+            ls-remote --refs --tags "$VLLM_REPO" 2>/dev/null | sed -n 's#^.*refs/tags/##p' || true)
+    fi
+
+    # Final releases only; an rc tag would report 0.28.0rc3.dev... instead of 0.28.1.dev...
+    VLLM_VERSION_ANCHOR=$(printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1) || true
+
+    if [ -z "$VLLM_VERSION_ANCHOR" ]; then
+        echo "Warning: Could not resolve a vLLM release tag; the wheel keeps its default setuptools-scm version."
+        return 0
+    fi
+
+    echo "Anchoring the vLLM wheel version to release tag $VLLM_VERSION_ANCHOR."
 }
 
 get_remote_image_id() {
@@ -609,6 +656,7 @@ usage() {
     echo "  --vllm-repo <url>             : vLLM Git repository (default: '${DEFAULT_VLLM_REPO}'); custom repositories bypass the shared checkout cache"
     echo "  --vllm-source-dir <path>      : Build vLLM from a clean local Git checkout; incompatible with --vllm-repo"
     echo "  --vllm-ref <ref>              : vLLM commit SHA, branch or tag (default: 'main'; local source defaults to HEAD)"
+    echo "  --vllm-version-anchor <tag>   : Release tag the built wheel's version is derived from; 'none' disables anchoring (default: newest vLLM release tag)"
     echo "  --torch-version <version>     : PyTorch version for build and runner images (default: '${DEFAULT_TORCH_VERSION}')"
     echo "  --torchvision-version <ver>   : Optional torchvision version (default: '${TORCHVISION_VERSION}')"
     echo "  --torchaudio-version <ver>    : Optional torchaudio version; use 'none' to omit it (default: '${TORCHAUDIO_VERSION}')"
@@ -670,6 +718,16 @@ while [[ "$#" -gt 0 ]]; do
             fi
             ;;
         --vllm-ref) VLLM_REF="$2"; VLLM_REF_SET=true; shift ;;
+        --vllm-version-anchor)
+            if [ -n "$2" ] && [[ "$2" != -* ]]; then
+                VLLM_VERSION_ANCHOR="$2"
+                VLLM_VERSION_ANCHOR_SET=true
+                shift
+            else
+                echo "Error: --vllm-version-anchor requires a release tag or 'none'."
+                exit 1
+            fi
+            ;;
         --torch-version)
             if [ -n "$2" ] && [[ "$2" != -* ]]; then
                 TORCH_VERSION="$2"
@@ -1248,6 +1306,11 @@ if [ "$NO_BUILD" = false ]; then
                 VLLM_CMD+=("--build-context" "vllm_source=$VLLM_SOURCE_CONTEXT")
                 VLLM_CMD+=("--build-arg" "VLLM_SOURCE_MODE=local")
                 VLLM_CMD+=("--build-arg" "VLLM_SOURCE_COMMIT=$VLLM_SOURCE_COMMIT")
+            fi
+
+            resolve_vllm_version_anchor
+            if [ -n "$VLLM_VERSION_ANCHOR" ]; then
+                VLLM_CMD+=("--build-arg" "VLLM_VERSION_ANCHOR=$VLLM_VERSION_ANCHOR")
             fi
 
             if [ "$APPLY_PRESET_VLLM_PRS" = true ]; then
