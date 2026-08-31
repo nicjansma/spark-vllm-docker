@@ -175,7 +175,7 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 `build-and-copy.sh --vllm-source-dir <path>` now builds vLLM from a clean local
 Git checkout without requiring the Docker builder to access its remote or host
 credentials. An optional `--vllm-ref` is resolved locally; otherwise the build
-uses the checkout's current `HEAD`. The host checkout is never modified.  `--vllm-version-anchor 0.28.0` can be used to set the anchored version.
+uses the checkout's current `HEAD`. The host checkout is never modified.
 
 ### 2026-08-21
 
