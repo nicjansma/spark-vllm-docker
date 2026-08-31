@@ -579,23 +579,6 @@ test_local_vllm_source_defaults_to_head() {
     pass "--vllm-source-dir defaults to the checkout HEAD"
 }
 
-create_tagged_vllm_repo() {
-    TAGGED_VLLM_REPO="$CASE_DIR/tagged-vllm"
-    mkdir -p "$TAGGED_VLLM_REPO"
-    git -C "$TAGGED_VLLM_REPO" init -q
-    git -C "$TAGGED_VLLM_REPO" config user.name "Build Test"
-    git -C "$TAGGED_VLLM_REPO" config user.email "build-test@example.invalid"
-    git -C "$TAGGED_VLLM_REPO" config commit.gpgsign false
-    printf '[build-system]\nrequires = []\n' > "$TAGGED_VLLM_REPO/pyproject.toml"
-    git -C "$TAGGED_VLLM_REPO" add pyproject.toml
-    git -C "$TAGGED_VLLM_REPO" commit -q -m "tagged vLLM fixture"
-    # v0.10.0 outranks v0.9.2 only under version sort; the rc tags must lose to
-    # v0.28.0 even though v0.28.1rc1 is numerically higher.
-    for tag in v0.9.2 v0.10.0 v0.26.1rc0 v0.27.1 v0.28.0 v0.28.1rc1; do
-        git -C "$TAGGED_VLLM_REPO" tag "$tag"
-    done
-}
-
 test_local_vllm_source_installs_b12x_for_upstream_origin() {
     setup_fixture
     create_local_vllm_source
@@ -850,9 +833,8 @@ def get_compressed_slot_mapping():
     pass
 PY
     cp -a "$patch_fixture" "$unknown_fixture"
-    sed -i.bak 's/_C128A_TOPK_ALIGNMENT = 128/_C128A_TOPK_ALIGNMENT = 64/' \
+    sed -i 's/_C128A_TOPK_ALIGNMENT = 128/_C128A_TOPK_ALIGNMENT = 64/' \
         "$unknown_fixture/vllm/v1/attention/backends/mla/compressor_utils.py"
-    rm -f "$unknown_fixture/vllm/v1/attention/backends/mla/compressor_utils.py.bak"
 
     VLLM_PATCH_B12X_C128A_ALIGNMENT=0 python3 "$patch_script" \
         "$patch_fixture" > "$output"
@@ -924,9 +906,8 @@ def profile_cudagraph_memory(runner):
             pass
 PY
     cp -a "$patch_fixture" "$unknown_fixture"
-    sed -i.bak 's/if manager.use_breakable_cg:/if bool(manager.use_breakable_cg):/' \
+    sed -i 's/if manager.use_breakable_cg:/if bool(manager.use_breakable_cg):/' \
         "$unknown_fixture/vllm/v1/worker/gpu/cudagraph_utils.py"
-    rm -f "$unknown_fixture/vllm/v1/worker/gpu/cudagraph_utils.py.bak"
 
     python3 "$patch_script" "$patch_fixture" > "$output"
     for expected in \

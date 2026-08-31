@@ -37,7 +37,8 @@ EXP_B12X=false
 EXP_B12X_VLLM_REPO="https://github.com/local-inference-lab/vllm"
 EXP_B12X_VLLM_REF="dev/infernal-invocation"
 B12X_PACKAGE_REPO="https://github.com/lukealonso/b12x.git"
-B12X_PACKAGE_REF="master"
+# 2026-08-31: needed to match latest local-inference-lab/vllm
+B12X_PACKAGE_REF="1.2.6"
 EXP_B12X_TORCH_VERSION="2.13.0"
 EXP_B12X_TORCHVISION_VERSION="0.28.0"
 EXP_B12X_TORCHAUDIO_VERSION="2.11.0"
